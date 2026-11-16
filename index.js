@@ -42,11 +42,28 @@ const ENDPOINTS = require('./src/config/endpoints');
 const OIDC_PROD_BASE = process.env.OIDC_PROD_BASE || ENDPOINTS.OIDC_PROD_BASE;
 const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 
+// 平台判定：GitHub Actions 注入 GITHUB_ACTIONS=true，用于选择 OIDC 身份提供商、
+// OBS 桶/读端点与来源标记；未命中时保持原 GitCode Actions 行为
+const IS_GITHUB = process.env.GITHUB_ACTIONS === 'true';
+// 上报来源标记：后端已支持 GITHUB_ACTION 枚举，GitCode 侧保持原有 GITCODE_ACTION
+const SOURCE_CODE = IS_GITHUB ? 'GITHUB_ACTION' : 'GITCODE_ACTION';
+
+// GitHub 平台使用独立 OIDC 身份提供商（华为云 IAM 注册名 GitHubActions）。
+// 必须在 getCredentials() 之前生效，否则会按 SDK 默认的 GitCodeActions 换证；
+// configure 为增量覆盖，后续 OBS 侧 configure({}) 不会清除该设置。
+if (IS_GITHUB && configure) {
+  configure({ oidcProviderName: 'GitHubActions' });
+}
+
 // OBS：通用 SARIF 结果统一存放（后端经平台 OBS 凭证读取，对象私有化口径）
 // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
-const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
-const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
+// 桶与读端点按平台隔离（GitHub Actions 使用独立桶），均可用同名环境变量覆盖
+const OBS_BUCKET = IS_GITHUB
+  ? (process.env.OBS_BUCKET_GITHUB || ENDPOINTS.OBS_BUCKET_GITHUB)
+  : (process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET);
+const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT ||
+  (IS_GITHUB ? ENDPOINTS.OBS_READ_ENDPOINT_GITHUB : ENDPOINTS.OBS_READ_ENDPOINT);
 // 对象私有（私有化安全硬约束）：不设置 ACL，依赖 OBS 对象默认私有，与
 // code-metrics-action 口径一致；SARIF 为仓库安全弱点地图（规则 ID/文件路径/
 // 代码片段），公开读即泄露安全底牌；后端已切换平台凭证下载，匿名可读不再依赖
@@ -62,13 +79,19 @@ const REGION_ENV_CANDIDATES = ['CODEARTS_REGION', 'CODEARTS_IAM_REGION', 'CLOUD_
 // ---------- 通用辅助 ----------
 
 function getInput(name) {
-  return (process.env[`INPUT_${name.toUpperCase()}`] || '').trim();
+  const upper = name.toUpperCase();
+  // GitHub Actions 将输入名中的 '-' 原样映射为 INPUT_<NAME>（如 INPUT_OBS-SSL-CA-FILE），
+  // GitCode 使用下划线；两种形态都读取，下划线优先以保持 GitCode 既有行为
+  const underscoreKey = `INPUT_${upper}`;
+  const dashKey = `INPUT_${upper.replace(/_/g, '-')}`;
+  return (process.env[underscoreKey] || process.env[dashKey] || '').trim();
 }
 
 function setOutput(key, value) {
-  const stepOutput = process.env.STEP_OUTPUT;
+  // GitHub Actions 用 GITHUB_OUTPUT，GitCode 用 STEP_OUTPUT
+  const stepOutput = process.env.GITHUB_OUTPUT || process.env.STEP_OUTPUT;
   if (!stepOutput) {
-    console.log(`[WARN] STEP_OUTPUT env not set, skip output: ${key}=${value}`);
+    console.log(`[WARN] GITHUB_OUTPUT/STEP_OUTPUT env not set, skip output: ${key}=${value}`);
     return;
   }
   let filePath;
@@ -78,7 +101,7 @@ function setOutput(key, value) {
     // 文件不存在但父目录有效时按文件路径追加（appendFileSync 自动创建）
     const parentDir = path.dirname(stepOutput);
     if (!(fs.existsSync(parentDir) && fs.statSync(parentDir).isDirectory())) {
-      console.log(`[WARN] STEP_OUTPUT path is invalid, skip output: ${key}=${value}`);
+      console.log(`[WARN] GITHUB_OUTPUT/STEP_OUTPUT path is invalid, skip output: ${key}=${value}`);
       return;
     }
     filePath = stepOutput;
@@ -405,8 +428,14 @@ function readTaskParams() {
   return { projectId, taskName, taskId, region };
 }
 
-/** 构造 Actions 运行页 URL：https://gitcode.com/{owner}/{repo}/actions/runs/{runId} */
+/** 构造 Actions 运行页 URL：GitHub 为 {GITHUB_SERVER_URL}/{owner}/{repo}/actions/runs/{runId}，GitCode 为 {仓库地址}/actions/runs/{runId} */
 function buildSourceRunUrl() {
+  if (IS_GITHUB) {
+    const ghRepo = process.env.GITHUB_REPOSITORY || '';
+    const ghRunId = process.env.GITHUB_RUN_ID || '';
+    if (!ghRepo || !ghRunId) return '';
+    return `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${ghRepo}/actions/runs/${ghRunId}`;
+  }
   const repoUrl = (process.env.ATOMGIT_REPOSITORY_URL || '').trim();
   const runId = process.env.ATOMGIT_RUN_ID || '';
   if (!repoUrl || !runId) return '';
@@ -420,12 +449,61 @@ function buildSourceRunUrl() {
   return `${httpsBase.replace(/\.git$/, '')}/actions/runs/${runId}`;
 }
 
-/** 回调分支：MR 事件用目标分支（ATOMGIT_HEAD_REF），其他事件用当前 ref */
+/**
+ * 回调分支：PR/MR 事件用目标分支，其他事件用当前 ref。
+ * GitHub：pull_request / pull_request_target 取 GITHUB_BASE_REF，其余取 GITHUB_REF_NAME；
+ * GitCode：MR 事件取 ATOMGIT_HEAD_REF，其余取 ATOMGIT_REF_NAME。
+ */
 function resolveBranch() {
+  if (IS_GITHUB) {
+    const eventName = (process.env.GITHUB_EVENT_NAME || '').toLowerCase();
+    return eventName === 'pull_request' || eventName === 'pull_request_target'
+      ? (process.env.GITHUB_BASE_REF || '')
+      : (process.env.GITHUB_REF_NAME || '');
+  }
   const eventName = (process.env.ATOMGIT_EVENT_NAME || '').toLowerCase();
   return eventName === 'mr'
     ? (process.env.ATOMGIT_HEAD_REF || '')
     : (process.env.ATOMGIT_REF_NAME || '');
+}
+
+/** 流水线上下文跨平台映射：GitHub Actions 用 GITHUB_*，GitCode 保持 ATOMGIT_* 原口径 */
+function resolvePlatformContext() {
+  if (IS_GITHUB) {
+    return {
+      pipelineRunId: process.env.GITHUB_RUN_ID || '',
+      pipelineId: process.env.GITHUB_JOB || '',
+      pipelineName: process.env.GITHUB_WORKFLOW || '',
+      commitId: process.env.GITHUB_SHA || ''
+    };
+  }
+  return {
+    pipelineRunId: process.env.ATOMGIT_RUN_ID || '',
+    pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
+    pipelineName: process.env.PIPELINE_NAME || '',
+    commitId: process.env.ATOMGIT_SHA || ''
+  };
+}
+
+/** 工作区根目录：GitCode 用 WORKSPACE，GitHub 用 GITHUB_WORKSPACE，最后兜底 cwd */
+function resolveWorkspace() {
+  return process.env.WORKSPACE || process.env.GITHUB_WORKSPACE || process.cwd();
+}
+
+/** OBS 路径中的仓库名：GitCode 取 ATOMGIT_REPOSITORY，GitHub 取 GITHUB_REPOSITORY，兜底 GIT_REPOSITORY */
+function resolveRepoBaseName() {
+  const repo = process.env.ATOMGIT_REPOSITORY || process.env.GITHUB_REPOSITORY || process.env.GIT_REPOSITORY || '';
+  return repo.split('/').pop() || 'unknown-repo';
+}
+
+/** 回调仓库地址：GitHub 用 GITHUB_SERVER_URL + GITHUB_REPOSITORY 拼装，GitCode 用 ATOMGIT_REPOSITORY_URL */
+function buildCallbackRepoUrl() {
+  if (IS_GITHUB) {
+    const repo = process.env.GITHUB_REPOSITORY || '';
+    if (!repo) return '';
+    return `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}`;
+  }
+  return process.env.ATOMGIT_REPOSITORY_URL || '';
 }
 
 /** 从 SARIF 文件提取工具名（runs[0].tool.driver.name），用于构建产物类型与 OBS 路径前缀；解析失败返回空 */
@@ -785,7 +863,13 @@ async function run() {
   const category = getInput('category');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const isBetaEnv = envType === 'beta';
-  const workflowRunId = process.env.ATOMGIT_RUN_ID || '';
+  // 流水线上下文跨平台取值：GitHub Actions 用 GITHUB_*，GitCode 保持原有 ATOMGIT_* 口径
+  const {
+    pipelineRunId: workflowRunId,
+    pipelineId,
+    pipelineName,
+    commitId
+  } = resolvePlatformContext();
 
   // CodeArts Check API 凭证：优先 runner 注入的 IAM AK/SK（老方式），兜底 SDK 换取的 OIDC 临时凭证。
   // defects-detail 接口暂不支持 OIDC（STS + X-Security-Token）调用，老 AK/SK 是首选。
@@ -800,6 +884,7 @@ async function run() {
   console.log(`[INFO] 环境类型: ${isBetaEnv ? 'beta (测试环境)' : 'prod (正式环境)'}`);
   console.log('[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）');
   console.log(`[INFO] 回调地址: ${callbackUrl}`);
+  console.log(`[INFO] 平台: ${IS_GITHUB ? 'GitHub Actions' : 'GitCode Actions'}，来源标记: ${SOURCE_CODE}，流水线上下文: pipelineId=${pipelineId || '(空)'}，pipelineRunId=${workflowRunId || '(空)'}，pipelineName=${pipelineName || '(空)'}，commitId=${commitId || '(空)'}`);
   console.log(`[INFO] CodeArts Check API 凭证: ${legacyAk && legacySk ? 'runner 注入 IAM AK/SK（老方式）' : 'OIDC 临时凭证（兜底）'}`);
 
   console.log('\n===== [1] 校验参数 =====');
@@ -846,7 +931,7 @@ async function run() {
   process.on('exit', () => cleanupConvertFiles(createdConvertFiles, convertOutDir));
 
   console.log('\n===== [3] 收集并生成 SARIF =====');
-  const workspace = process.env.WORKSPACE || process.cwd();
+  const workspace = resolveWorkspace();
   const sarifFiles = [];
   let apiConsumed = false;
 
@@ -944,7 +1029,7 @@ async function run() {
   enrichSarifFiles(sarifFiles, sourceRoots);
 
   console.log('\n===== [5] 构建 OBS 路径 =====');
-  const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
+  const repoBaseName = resolveRepoBaseName();
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
   // 统一路径结构：{工具名前缀}-results/{仓库名}/{yyyyMMdd}.{HH}/{runId|manual}/{文件名}
@@ -1022,16 +1107,18 @@ async function run() {
   console.log('\n===== [7] 回调通知（失败指数退避重试，默认 3 次） =====');
   const obsUrls = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
   const callbackPayload = {
-    repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
-    pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
-    pipelineName: process.env.PIPELINE_NAME || '',
+    // GitHub 用 GITHUB_SERVER_URL + GITHUB_REPOSITORY 拼仓库地址，GitCode 保持 ATOMGIT_REPOSITORY_URL
+    repoUrl: buildCallbackRepoUrl(),
+    pipelineId,
+    pipelineName,
     pipelineRunId: workflowRunId || '',
     branch: resolveBranch(),
-    commitId: process.env.ATOMGIT_SHA || '',
+    commitId,
     // 后端 DTO 为 List<String>，恒传数组兼容新旧后端（旧版无 StringOrListDeserializer）
     obsUrl: Array.isArray(obsUrls) ? obsUrls : [obsUrls],
     category: category || '',
-    source: 'GITCODE_ACTION',
+    // 来源标记按运行平台区分：GitHub Actions 上报 GITHUB_ACTION，GitCode 上报 GITCODE_ACTION
+    source: SOURCE_CODE,
     sourceRunUrl: buildSourceRunUrl() || ''
   };
 
@@ -1069,7 +1156,20 @@ module.exports = {
   withRetryAsync,
   buildToolPrefix,
   sanitizeLogValue,
-  cleanupConvertFiles
+  cleanupConvertFiles,
+  // 平台适配相关（供单测覆盖双平台分支，不参与运行时契约）
+  IS_GITHUB,
+  SOURCE_CODE,
+  OBS_BUCKET,
+  OBS_READ_ENDPOINT,
+  getInput,
+  setOutput,
+  buildSourceRunUrl,
+  resolveBranch,
+  resolvePlatformContext,
+  resolveWorkspace,
+  resolveRepoBaseName,
+  buildCallbackRepoUrl
 };
 
 if (require.main === module) {
