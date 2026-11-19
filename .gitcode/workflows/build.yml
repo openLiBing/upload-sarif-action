@@ -26,7 +26,7 @@ jobs:
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
 
-      - name: Build oss-scan-action
+      - name: Build
         run: |
           npm ci
           npm run build
