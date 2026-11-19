@@ -7,12 +7,12 @@ on:
       - main
   pull_request: # 配置中无密钥引用，使用 pull_request 触发
     branches:
-      - '*'
+      - "*"
   pull_request_comment:
     types: [created]
-    comments: ['/pre-commit']
+    comments: ["/pre-commit"]
     branches:
-      - '*'
+      - "*"
 
 permissions:
   repository: read
@@ -20,7 +20,7 @@ permissions:
 jobs:
   pre-commit:
     name: pre-commit
-    runs-on: ['self-hosted', 'default']
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: Checkout repository
         uses: checkout

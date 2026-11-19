@@ -7,19 +7,19 @@ on:
       - main
   pull_request: # PR 触发构建验证
     branches:
-      - '*'
+      - "*"
   pull_request_comment:
     types: [created]
-    comments: ['/build']
+    comments: ["/build"]
     branches:
-      - '*'
+      - "*"
 
 permissions:
   repository: read
 
 jobs:
   build:
-    runs-on: ['self-hosted', 'default']
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: checkout
         uses: checkout

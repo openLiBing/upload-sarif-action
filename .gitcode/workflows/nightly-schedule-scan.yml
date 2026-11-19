@@ -16,7 +16,7 @@ stages:
     jobs:
       pre-commit:
         name: pre-commit
-        runs-on: ['self-hosted', 'default']
+        runs-on: ["self-hosted", "default"]
         steps:
           - name: Checkout repository
             uses: checkout
@@ -47,7 +47,7 @@ stages:
 
       ut-coverage:
         name: UT 覆盖率
-        runs-on: ['self-hosted', 'default']
+        runs-on: ["self-hosted", "default"]
         steps:
           - name: Checkout repository
             uses: checkout
@@ -67,7 +67,7 @@ stages:
 
       oss-version-scan:
         name: 开源漏洞和license扫描
-        runs-on: ['self-hosted', 'default']
+        runs-on: ["self-hosted", "default"]
         steps:
           - name: Checkout repository
             uses: checkout
@@ -86,4 +86,4 @@ stages:
               license-high-limit: ${{ vars.NIGHTLY_LICENSE_HIGH_LIMIT || '50' }}
               license-medium-limit: ${{ vars.NIGHTLY_LICENSE_MEDIUM_LIMIT || '1000' }}
               license-low-limit: ${{ vars.NIGHTLY_LICENSE_LOW_LIMIT || '10000' }}
-              show-all-vulnerabilities: 'true'
+              show-all-vulnerabilities: "true"

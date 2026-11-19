@@ -3,7 +3,7 @@ name: oss-pr-scan
 on:
   pull_request:
     branches:
-      - '**'
+      - "**"
 
 permissions:
   repository: read
@@ -11,7 +11,7 @@ permissions:
 jobs:
   oss-pr-scan:
     name: 开源漏洞和license扫描
-    runs-on: ['self-hosted', 'default']
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: Checkout repository
         uses: checkout

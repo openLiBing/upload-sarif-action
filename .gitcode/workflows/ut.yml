@@ -12,7 +12,7 @@ on:
     types: [created]
     comments: ["/ut"]
     branches:
-      - '*'
+      - "*"
 
 permissions:
   repository: read # checkout 插件最低权限要求
@@ -28,7 +28,7 @@ env:
 
 jobs:
   ut:
-    runs-on: ['self-hosted', 'default']
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: checkout
         uses: checkout

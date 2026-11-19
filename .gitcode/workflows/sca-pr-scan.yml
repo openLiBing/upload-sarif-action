@@ -3,12 +3,12 @@ name: sca-pr-scan
 on:
   pull_request_target: ## 使用 pull_request_target 确保 PR 流水线始终读取默认分支的最新配置文件
     branches:
-      - '*'
+      - "*"
   pull_request_comment: ## PR 评论事件：当用户在 PR 中发表评论时触发
     types: [created]
-    comments: ['/sca-pr-scan']
+    comments: ["/sca-pr-scan"]
     branches:
-      - '*'
+      - "*"
 
 permissions:
   repository: read
@@ -17,7 +17,7 @@ permissions:
 jobs:
   sca-pr-scan:
     name: sca-pr-scan
-    runs-on: ['self-hosted', 'default']
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: Run sca-pr-action
         uses: openlibing/sca-action/sca-pr-action@v1.0.0
