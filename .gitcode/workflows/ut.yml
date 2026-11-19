@@ -1,8 +1,8 @@
-name: ut
+name: ut-coverage
 
 on:
   workflow_dispatch:
-  push: # main 分支推送触发 UT
+  push:
     branches:
       - main
   pull_request: # PR 触发 UT
@@ -21,40 +21,20 @@ permissions:
 env:
   # UT增量行覆盖率门禁阈值：低于该值 PR 流水线失败，可通过仓库变量覆盖，未配置默认 80
   UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD: ${{ vars.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD || '80' }}
-  # UT报告输出目录：当前为 c8 插件默认输出路径，自定义 reporter 输出时需同步调整
+  # UT报告输出目录：c8 默认输出路径
   UT_REPORT_DIR: coverage/
   # PR 触发场景标记：覆盖率上报仅 push/手动触发执行；contains 以 event_name 为子串匹配列表，最长事件名 pull_request_target/pull_request_comment 在列即可覆盖 pull_request 全部变体，MR/Note 为平台事件别名
   IS_PR_EVENT: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
 
 jobs:
   ut:
-    name: ut
-    runs-on: ["self-hosted", "region=cn"]
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: checkout
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }} # PR 场景检出预合并 commit（验证合入默认分支后的最终状态），push/手动场景为空走默认检出
           fetch-depth: 0 # 全量检出以生成基线分支远端 ref，供增量覆盖率比较
-
-      # setup-node/setup-python 官方插件存在 tool cache 目录权限缺陷（/opt/tools/cache 无写权限时安装失败 EACCES），插件修复前在此临时规避
-      - name: bootstrap tool cache dir
-        run: |
-          if [ ! -d /opt/tools/cache ] || [ ! -w /opt/tools/cache ]; then
-            sudo mkdir -p /opt/tools/cache
-            sudo chown -R "$(id -u):$(id -g)" /opt/tools
-          fi
-
-      - name: setup-node
-        uses: setup-node
-        with:
-          node-version: 20
-          cache: true
-
-      - name: setup-python
-        uses: setup-python
-        with:
-          version: 3.14.3
 
       # c8 采集覆盖率并生成双格式报告：coverage-final.json（上报平台）+ cobertura-coverage.xml（增量门禁）
       - name: ut
@@ -64,7 +44,7 @@ jobs:
 
       # 将ut报告上传至openlibing平台运营，插件自动识别 c8 格式
       - name: upload ut report to openlibing
-        if: ${{ always() && env.IS_PR_EVENT != 'true' }}
+        if: ${{ always() && env.IS_PR_EVENT != 'true' }} # 覆盖率上报仅 push/手动触发执行
         uses: openlibing/upload-ut-action@v1.0.0
         with:
           report_dir: ${{ env.UT_REPORT_DIR }}
@@ -73,7 +53,7 @@ jobs:
       - name: diff coverage check
         if: ${{ env.IS_PR_EVENT == 'true' }}
         run: |
-          pip install diff-cover
+          python -m pip install diff-cover
           diff-cover ${{ env.UT_REPORT_DIR }}cobertura-coverage.xml --compare-branch origin/$ATOMGIT_BASE_REF --fail-under ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }} --html-report ${{ env.UT_REPORT_DIR }}diff-coverage.html || {
             echo "[UT 增量行覆盖率门禁] 未达标：目标 >= ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }}%，实际值见上方 Coverage，请为本次变更代码补充单元测试后重新触发"
             exit 1
